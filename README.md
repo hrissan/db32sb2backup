@@ -3,6 +3,6 @@ Tool to convert db3 SmartBudget database extracted from iTunes backup to backup 
 
 After upgrade to iOS 14 some users report that Smart Budget 2 crashes after launch.
 
-Thos users can extract .db3 databases using Iphone Backup Extractor tool, but they are in internal SmartBudget 2 format.
+Thos users can extract .db3 databases using Iphone Backup Extractor (https://www.iphonebackupextractor.com) tool, but they are in internal SmartBudget 2 format.
 
 This tool converts those .db3 files to .sb2backup files that can be opened by Smart Budget on the same or different device after reinstalling SmartBudget 2.
