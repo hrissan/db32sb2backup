@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
+	"strconv"
 
 	sq3 "github.com/mattn/go-sqlite3"
 )
@@ -37,46 +40,27 @@ type SB2Backup struct {
 	Commands []Command `json:"commands"`
 }
 
-var argv struct {
-	inputFile string
-	outputFile string
-}
+func convertDB3File(inputFile string) (*SB2Backup, *bytes.Buffer, error) {
 
-func main() {
-	log.Println(sq3.Version())
-
-	flag.StringVar(&argv.inputFile, "i", "", "input file to process")
-	flag.StringVar(&argv.outputFile, "o", "", "output file to write")
-
-	flag.Parse()
-
-	if argv.inputFile == "" {
-		log.Fatalf("-i flag is mandatory")
-	}
-	if argv.outputFile == "" {
-		argv.outputFile = argv.inputFile + ".sb2backup"
-	}
-	fmt.Printf("Converting %s -> %s\n", argv.inputFile, argv.outputFile)
-
-	_, err := os.Stat(argv.inputFile)
+	_, err := os.Stat(inputFile)
 	if os.IsNotExist(err) {
-		log.Fatalf("database doesn't exist, %v", err)
+		return nil, nil, fmt.Errorf("database doesn't exist, %v", err)
 	}
-	db, err := sql.Open("sqlite3", argv.inputFile)
+	db, err := sql.Open("sqlite3", inputFile)
 	if err != nil {
-		log.Fatalf("Could not open input file, %v", err)
+		return nil, nil, fmt.Errorf("Could not open input file, %v", err)
 	}
 	defer db.Close()
 
 	var schema, local_version int
 	if err := db.QueryRow("select value from DBKeyValue where key = 'schema'").Scan(&schema); err != nil {
-		log.Fatalf("DBKeyValue contains no schema, %v", err)
+		return nil, nil, fmt.Errorf("DBKeyValue contains no schema, %v", err)
 	}
 	if err := db.QueryRow("select value from DBKeyValue where key = 'local_version'").Scan(&local_version); err != nil {
-		log.Fatalf("DBKeyValue contains no local_version, %v", err)
+		return nil, nil, fmt.Errorf("DBKeyValue contains no local_version, %v", err)
 	}
 	if schema != 1 {
-		log.Fatalf("Unknown schema, must be 1")
+		return nil, nil, fmt.Errorf("Unknown schema, must be 1")
 	}
 	//if local_version > 3 {
 	//	log.Fatalf("Unknown local_version, %d", local_version)
@@ -106,22 +90,130 @@ func main() {
 
 	rows, err := db.Query("select data from DBCommand order by Id")
 	if err != nil {
-		log.Fatalf("Cannot query DBCommand table, %v", err)
+		return nil, nil, fmt.Errorf("Cannot query DBCommand table, %v", err)
 	}
 	for rows.Next(){
 		var command string
 		err := rows.Scan(&command)
 		if err != nil{
-			log.Fatalf("Error scanning DBCommands, %v", err)
+			return nil, nil, fmt.Errorf("Error scanning DBCommands, %v", err)
 		}
 		backup.Commands = append(backup.Commands, Command(command))
 	}
 
-	w := bytes.Buffer{}
-	if err := json.NewEncoder(&w).Encode(&backup); err != nil {
-		log.Fatalf("Error encoding json, %v", err)
+	jw := bytes.Buffer{}
+	if err := json.NewEncoder(&jw).Encode(&backup); err != nil {
+		return nil, nil, fmt.Errorf("Error encoding json, %v", err)
 	}
-	if err := ioutil.WriteFile(argv.outputFile, w.Bytes(), 0644); err != nil {
+	return &backup, &jw, nil
+}
+
+var argv struct {
+	inputFile string
+	outputFile string
+	webAppPort int
+}
+
+func writeError(w http.ResponseWriter, error string) {
+	w.Header().Set("Content-Type", "text/plain")
+	_, _ = w.Write([]byte(error))
+}
+
+func uploadFile(w http.ResponseWriter, r *http.Request) {
+	err := r.ParseMultipartForm(10 << 20)
+	if err != nil {
+		writeError(w, fmt.Sprintf("Not a multipart form, %v", err))
+		return
+	}
+	file, handler, err := r.FormFile("db3File")
+	if err != nil {
+		writeError(w, fmt.Sprintf("Error Retrieving the File, %v", err))
+		return
+	}
+	defer file.Close()
+	fmt.Printf("Uploaded File: %+v\n", handler.Filename)
+	fmt.Printf("File Size: %+v\n", handler.Size)
+	fmt.Printf("MIME Header: %+v\n", handler.Header)
+
+	// Create a temporary file within our temp-images directory that follows
+	// a particular naming pattern
+	tempFile, err := ioutil.TempFile("", "upload-*.png")
+	if err != nil {
+		writeError(w, fmt.Sprintf("Cannot create tmp file, %v", err))
+		return
+	}
+
+	_, err = io.Copy(tempFile, file)
+	if err != nil {
+		writeError(w, fmt.Sprintf("Error saving tmp file, %v", err))
+		return
+	}
+	tempName := tempFile.Name()
+	_ = tempFile.Close()
+	_, jw, err := convertDB3File(tempName)
+	if err != nil {
+		writeError(w, fmt.Sprintf("Error converting file %v", err))
+		return;
+	}
+
+
+	w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(handler.Filename + ".sb2backup"))
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", jw.Len()))
+	_, _ = w.Write(jw.Bytes())
+	_ = os.Remove(tempName) // Erase user's secrets. Alas, sqlite will not easily open memory chunk as a DB without temp file
+}
+
+func indexFile(w http.ResponseWriter, r *http.Request) {
+	_, _ = w.Write([]byte(`<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>Convert Smart Budget 2 internal database to backup file that can be opened in Smart Budget 2 again</title>
+  </head>
+  <body>
+	Convert Smart Budget 2 internal database to backup file that can be opened in Smart Budget 2 again<br/>
+    <form
+      enctype="multipart/form-data"
+      action="upload.html"
+      method="post"
+    >
+      <input type="file" name="db3File" />
+      <input type="submit" value="Convert" />
+    </form>
+  </body>
+</html>`))
+}
+
+func main() {
+	log.Println(sq3.Version())
+
+	flag.IntVar(&argv.webAppPort, "port", 0, "run web server on selected port, 0 to run as a command-line tool")
+	flag.StringVar(&argv.inputFile, "i", "", "input file to process")
+	flag.StringVar(&argv.outputFile, "o", "", "output file to write")
+
+	flag.Parse()
+
+	if argv.webAppPort != 0 {
+		http.HandleFunc("/upload.html", uploadFile)
+		http.HandleFunc("/index.html", indexFile)
+		if err:= http.ListenAndServe(fmt.Sprintf(":%d", argv.webAppPort), nil); err != nil {
+			log.Fatal("Cannot listen on selected port, %v", err)
+		}
+		return
+	}
+
+	if argv.inputFile == "" {
+		log.Fatalf("-i flag is mandatory")
+	}
+	if argv.outputFile == "" {
+		argv.outputFile = argv.inputFile + ".sb2backup"
+	}
+	fmt.Printf("Converting %s -> %s\n", argv.inputFile, argv.outputFile)
+	backup, jw, err := convertDB3File(argv.inputFile)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	if err := ioutil.WriteFile(argv.outputFile, jw.Bytes(), 0644); err != nil {
 		log.Fatalf("Error saving file, %v", err)
 	}
 	log.Printf("Successfully exported %d commands", len(backup.Commands))
