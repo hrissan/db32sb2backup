@@ -197,6 +197,7 @@ func main() {
 	if argv.webAppPort != 0 {
 		http.HandleFunc("/upload.html", uploadFile)
 		http.HandleFunc("/index.html", indexFile)
+		http.HandleFunc("/", indexFile)
 		if err:= http.ListenAndServe(fmt.Sprintf(":%d", argv.webAppPort), nil); err != nil {
 			log.Fatal("Cannot listen on selected port, %v", err)
 		}
