@@ -179,7 +179,8 @@ func indexFile(w http.ResponseWriter, r *http.Request) {
     >
       <input type="file" name="db3File" />
       <input type="submit" value="Convert" />
-    </form>
+    </form><br/>
+	<a href="https://github.com/hrissan/db32sb2backup">Source code</a>
   </body>
 </html>`))
 }
