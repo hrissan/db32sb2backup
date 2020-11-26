@@ -40,7 +40,7 @@ type SB2Backup struct {
 	Commands []Command `json:"commands"`
 }
 
-func convertDB3File(inputFile string) (*SB2Backup, *bytes.Buffer, error) {
+func convertDB3File(inputFile string, verbose bool) (*SB2Backup, *bytes.Buffer, error) {
 
 	_, err := os.Stat(inputFile)
 	if os.IsNotExist(err) {
@@ -48,7 +48,7 @@ func convertDB3File(inputFile string) (*SB2Backup, *bytes.Buffer, error) {
 	}
 	db, err := sql.Open("sqlite3", inputFile)
 	if err != nil {
-		return nil, nil, fmt.Errorf("Could not open input file, %v", err)
+		return nil, nil, fmt.Errorf("sqlite3 could not open input file, %v", err)
 	}
 	defer db.Close()
 
@@ -70,22 +70,34 @@ func convertDB3File(inputFile string) (*SB2Backup, *bytes.Buffer, error) {
 	backup.DBVersion = 20
 
 	if err := db.QueryRow("select value from DBKeyValue where key = 'a_token'").Scan(&backup.AToken); err != nil {
-		fmt.Printf("DBKeyValue contains no a_token - no cloud sync set up\n")
+		if verbose {
+			fmt.Printf("DBKeyValue contains no a_token - no cloud sync set up\n")
+		}
 	}
 	if err := db.QueryRow("select value from DBKeyValue where key = 'e_key_b64'").Scan(&backup.EKeyB64); err != nil {
-		fmt.Printf("DBKeyValue contains no e_key_b64 - no cloud sync set up\n")
+		if verbose {
+			fmt.Printf("DBKeyValue contains no e_key_b64 - no cloud sync set up\n")
+		}
 	}
 	if err := db.QueryRow("select value from DBKeyValue where key = 'cypher'").Scan(&backup.Cypher); err != nil {
-		fmt.Printf("DBKeyValue contains no cypher - no cloud sync set up\n")
+		if verbose {
+			fmt.Printf("DBKeyValue contains no cypher - no cloud sync set up\n")
+		}
 	}
 	if err := db.QueryRow("select value from DBKeyValue where key = 'selected_sheet'").Scan(&backup.SelectedSheet); err != nil {
-		fmt.Printf("DBKeyValue contains no selected_sheet - selected sheet will otnot be restored\n")
+		if verbose {
+			fmt.Printf("DBKeyValue contains no selected_sheet - selected sheet will not be restored\n")
+		}
 	}
 	if err := db.QueryRow("select value from DBKeyValue where key = 'last_change_id'").Scan(&backup.LastChangeId); err != nil {
-		fmt.Printf("DBKeyValue contains no last_change_id - no cloud sync set up\n")
+		if verbose {
+			fmt.Printf("DBKeyValue contains no last_change_id - no cloud sync set up\n")
+		}
 	}
 	if err := db.QueryRow("select value from DBKeyValue where key = 'last_change_commands_size'").Scan(&backup.LastChangeCommandSize); err != nil {
-		fmt.Printf("DBKeyValue contains no last_change_commands_size - no cloud sync set up\n")
+		if verbose {
+			fmt.Printf("DBKeyValue contains no last_change_commands_size - no cloud sync set up\n")
+		}
 	}
 
 	rows, err := db.Query("select data from DBCommand order by Id")
@@ -96,6 +108,7 @@ func convertDB3File(inputFile string) (*SB2Backup, *bytes.Buffer, error) {
 		var command string
 		err := rows.Scan(&command)
 		if err != nil{
+			_ = rows.Close()
 			return nil, nil, fmt.Errorf("Error scanning DBCommands, %v", err)
 		}
 		backup.Commands = append(backup.Commands, Command(command))
@@ -131,14 +144,13 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	fmt.Printf("Uploaded File: %+v\n", handler.Filename)
-	fmt.Printf("File Size: %+v\n", handler.Size)
-	fmt.Printf("MIME Header: %+v\n", handler.Header)
+	log.Printf("Uploaded file: '%s', size: %v", handler.Filename, handler.Size)
 
 	// Create a temporary file within our temp-images directory that follows
 	// a particular naming pattern
 	tempFile, err := ioutil.TempFile("tmp", "upload-*.db3")
 	if err != nil {
+		log.Printf("    Cannot create tmp file, %v", err)
 		writeError(w, fmt.Sprintf("Cannot create tmp file, %v", err))
 		return
 	}
@@ -148,13 +160,15 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 
 	_, err = io.Copy(tempFile, file)
 	if err != nil {
+		log.Printf("    Error saving tmp file, %v", err)
 		writeError(w, fmt.Sprintf("Error saving tmp file, %v", err))
 		_ = tempFile.Close()
 		return
 	}
 	_ = tempFile.Close()
-	_, jw, err := convertDB3File(tempName)
+	backup, jw, err := convertDB3File(tempName, false)
 	if err != nil {
+		log.Printf("    Error converting file, %v", err)
 		writeError(w, fmt.Sprintf("Error converting file %v", err))
 		return;
 	}
@@ -162,6 +176,7 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(handler.Filename + ".sb2backup"))
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", jw.Len()))
+	log.Printf("    Converted file, size: %v, #commands: %v, cypher: '%s'", jw.Len(), len(backup.Commands), backup.Cypher)
 	_, _ = w.Write(jw.Bytes())
 }
 
@@ -199,12 +214,21 @@ func main() {
 	if argv.webAppPort != 0 {
 		tempFile, err := ioutil.TempFile("tmp", "upload-*.db3")
 		if err != nil {
-			log.Fatal("Cannot create tmp file, folder 'tmp' should exist in the current path, %v", err)
+			log.Fatalf("Cannot create tmp file, folder 'tmp' should exist in the current path, %v", err)
 			return
 		}
 		tempName := tempFile.Name()
 		_ = tempFile.Close()
 		_ = os.Remove(tempName)
+
+		f, err := os.OpenFile("log.txt", os.O_RDWR | os.O_CREATE | os.O_APPEND, 0666)
+		if err != nil {
+			log.Fatalf("Error opening log file: %v", err)
+		}
+		defer f.Close()
+
+		log.SetOutput(io.MultiWriter(os.Stdout, f))
+		log.Printf("Start")
 
 		http.HandleFunc("/upload.html", uploadFile)
 		http.HandleFunc("/index.html", indexFile)
@@ -222,7 +246,7 @@ func main() {
 		argv.outputFile = argv.inputFile + ".sb2backup"
 	}
 	fmt.Printf("Converting %s -> %s\n", argv.inputFile, argv.outputFile)
-	backup, jw, err := convertDB3File(argv.inputFile)
+	backup, jw, err := convertDB3File(argv.inputFile, true)
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
