@@ -120,7 +120,7 @@ func writeError(w http.ResponseWriter, error string) {
 }
 
 func uploadFile(w http.ResponseWriter, r *http.Request) {
-	err := r.ParseMultipartForm(10 << 20)
+	err := r.ParseMultipartForm(50 << 20)
 	if err != nil {
 		writeError(w, fmt.Sprintf("Not a multipart form, %v", err))
 		return
