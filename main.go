@@ -137,18 +137,21 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 
 	// Create a temporary file within our temp-images directory that follows
 	// a particular naming pattern
-	tempFile, err := ioutil.TempFile("", "upload-*.png")
+	tempFile, err := ioutil.TempFile("tmp", "upload-*.db3")
 	if err != nil {
 		writeError(w, fmt.Sprintf("Cannot create tmp file, %v", err))
 		return
 	}
+	tempName := tempFile.Name()
+	// Erase user's secrets. Alas, sqlite will not easily open memory chunk as a DB without temp file
+	defer os.Remove(tempName)
 
 	_, err = io.Copy(tempFile, file)
 	if err != nil {
 		writeError(w, fmt.Sprintf("Error saving tmp file, %v", err))
+		_ = tempFile.Close()
 		return
 	}
-	tempName := tempFile.Name()
 	_ = tempFile.Close()
 	_, jw, err := convertDB3File(tempName)
 	if err != nil {
@@ -156,15 +159,14 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 		return;
 	}
 
-
 	w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(handler.Filename + ".sb2backup"))
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", jw.Len()))
 	_, _ = w.Write(jw.Bytes())
-	_ = os.Remove(tempName) // Erase user's secrets. Alas, sqlite will not easily open memory chunk as a DB without temp file
 }
 
 func indexFile(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(`<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -195,6 +197,15 @@ func main() {
 	flag.Parse()
 
 	if argv.webAppPort != 0 {
+		tempFile, err := ioutil.TempFile("tmp", "upload-*.db3")
+		if err != nil {
+			log.Fatal("Cannot create tmp file, folder 'tmp' should exist in the current path, %v", err)
+			return
+		}
+		tempName := tempFile.Name()
+		_ = tempFile.Close()
+		_ = os.Remove(tempName)
+
 		http.HandleFunc("/upload.html", uploadFile)
 		http.HandleFunc("/index.html", indexFile)
 		http.HandleFunc("/", indexFile)
